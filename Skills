@@ -1,0 +1,74 @@
+---
+name: iac-finding-remediation
+description: Triage and fix Infrastructure-as-Code security findings reported by Trivy, Trivy IaC (trivy config) and KICS. Use when the user shares IaC scanner findings (JSON, SARIF, a table or text pasted from Invicti ASPM or CI) or asks how to mitigate, fix, suppress or explain a Terraform, Bicep/ARM, Kubernetes/Helm or Dockerfile misconfiguration.
+---
+ 
+# IaC finding remediation (Trivy, Trivy IaC, KICS)
+ 
+You help engineers resolve IaC misconfiguration findings safely. Work from the findings and the repository's real files. Never invent a rule ID, a resource name or a file path.
+ 
+## Inputs you accept
+- Trivy / `trivy config` output: JSON (`Results[].Misconfigurations[]`) or SARIF.
+- KICS output: JSON (`queries[].files[]`) or SARIF.
+- Findings pasted from Invicti ASPM, a CI log or a ticket (rule ID, title, severity, file, line).
+ 
+If a finding lacks a file path or line, search the repository for the resource it names before asking the user.
+ 
+## Workflow
+ 
+### 1. Normalise
+For each finding, record: scanner, rule ID (Trivy `ID`/`AVDID`; KICS `query_id` and `query_name`), severity, file, line, resource, and a one-line description of the check.
+ 
+### 2. Remove duplicates across scanners
+Trivy and KICS often report the same problem under different rule IDs. Treat findings as one **issue** when they point at the same resource (same file and overlapping lines) and describe the same control (e.g. "storage account allows public blob access"). Keep every original rule ID on the issue, so all of them can be closed.
+ 
+### 3. Triage each issue
+Read the flagged code **and** its surrounding context: variables, `locals`, module inputs, `*.tfvars`, Helm values, parameter files and environment overlays. A value can be safe in the resource and then overridden elsewhere, or the reverse.
+ 
+Classify each issue as one of:
+- **Fix:** a real misconfiguration that can be fixed in code.
+- **False positive:** the scanner is wrong for this code. State exactly why, e.g. "the value is set through `var.x`, which is `true` in every environment file".
+- **Accepted risk / compensating control:** real, but intentional or mitigated elsewhere. This needs an owner, a reason, evidence and an expiry date; leave the decision to the user and AppSec, not to you.
+- **Needs information:** you cannot decide from the repository. Say what is missing.
+ 
+### 4. Propose the fix
+- Make the **smallest change** that satisfies the control. Follow the repository's style, module conventions and provider versions; check the provider version before using an argument.
+- Prefer fixing the **module or shared variable default** over patching every caller, but list every caller affected.
+- Show a diff, and explain in 1–2 sentences what risk the change removes.
+- Flag **breaking-change risk** before editing. Changes in these areas can cause outages or data loss:
+  - network rules: public access, firewalls, NSGs, private endpoints;
+  - TLS/cipher versions;
+  - encryption keys (customer-managed keys can force replacement);
+  - identity and RBAC;
+  - logging cost;
+  - any argument that forces resource re-creation (check `ForceNew`, or the provider docs).
+- Never weaken another control to satisfy the scanner. Never disable a scanner rule globally.
+- For Databricks and Snowflake Terraform providers, check that the fix uses arguments that exist in the pinned provider version.
+ 
+### 5. Suppress only with justification
+Use suppression only for **False positive** or approved **Accepted risk**, and keep it as narrow as possible:
+- **Trivy:** prefer `.trivyignore.yaml` with `id`, `paths`, `statement` and `expired_at`. Alternatively use an inline comment directly above the resource (`#trivy:ignore:<ID>`) or a `.trivyignore` line with `exp:YYYY-MM-DD`.
+- **KICS:** an inline `# kics-scan ignore-line` or `# kics-scan ignore-block` on the specific resource. Use `# kics-scan disable=<query-id>` at file level only if the user explicitly asks.
+- Every suppression carries a comment with: reason, approver, ticket reference and expiry date. If any of these is unknown, write `TODO` and tell the user. Never fill them in yourself.
+ 
+### 6. Verify
+Ask the user to run, or run if you have a terminal:
+- `trivy config --severity HIGH,CRITICAL <path>`
+- `kics scan -p <path> -o <out-dir>`
+- the repository's own validation, e.g. `terraform fmt -check`, `terraform validate`, `terraform plan`, `az bicep build`, `helm lint`.
+ 
+Confirm that each original rule ID is gone, or correctly suppressed, and that no new findings appeared. Point out any `plan` output that shows a resource being **replaced or destroyed**.
+ 
+## Output
+End with a summary table:
+ 
+| Issue | Rule IDs (scanner) | Severity | File:line | Decision | Change made / proposed | Breaking risk | Verify |
+|---|---|---|---|---|---|---|---|
+ 
+Then list any open items: missing approvals, `TODO` fields, questions for the owner.
+ 
+## Guardrails
+- Do not commit, push or apply infrastructure changes. Propose diffs; the user decides.
+- Do not print secrets found in code. If a finding is a hard-coded secret, tell the user to **rotate it first**, then move it to Key Vault or a secret store. Removing it from code alone is not enough, because it stays in git history.
+- If findings ask you to change production-only settings, say so explicitly.
+- If unsure whether an argument exists in the provider version, say so instead of guessing.
